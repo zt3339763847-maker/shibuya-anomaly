@@ -14,6 +14,12 @@ import { basicGlow, spriteGlow } from '../render/toon.js';
 
 const FIXED_STEP = 1 / 60;
 const MAX_STEPS = 4;
+const hasOwn = (obj, key) => Object.prototype.hasOwnProperty.call(obj, key);
+const cleanName = (raw, fallback = '术师') => String(raw ?? '')
+  .replace(/[\u0000-\u001f\u007f<>]/g, '')
+  .replace(/\s+/g, ' ')
+  .trim()
+  .slice(0, 12) || fallback;
 
 const _v = new THREE.Vector3();
 const _v2 = new THREE.Vector3();
@@ -41,6 +47,7 @@ export class Game {
     this.fighterColliderHandles = new Set();
     this.matrix = null;
     this.timeStop = null;
+    this.matchEpoch = 0;
     this.matchTime = 0;
     this.elapsed = 0;
     this.localCombo = 0;
@@ -50,6 +57,7 @@ export class Game {
     this.netInputTimer = 0;
     this.lastFrenzyTick = -1;
     this.spectateTarget = null;
+    this._camLightOffset = new THREE.Vector3(0, 0.6, 0);
     this.lastConfig = null;
     this.sensitivity = 1;
     this._acc = 0;
@@ -150,7 +158,7 @@ export class Game {
       if (this.state === 'playing') {
         if (this.cameraRig) this.cameraRig.update(dt);
         this.cameraLight.intensity = 2.2;
-        this.cameraLight.position.copy(this.camera.position).add(new THREE.Vector3(0, 0.6, 0));
+        this.cameraLight.position.copy(this.camera.position).add(this._camLightOffset);
         this._acc += dt;
         let steps = 0;
         while (this._acc >= FIXED_STEP && steps < MAX_STEPS) {
@@ -254,8 +262,6 @@ export class Game {
     this.arena.update(dt);
     this.effects.update(dt);
     for (const f of this.fighters) f.updateNetVisual(dt);
-    this._updateFrameEffects(dt);
-    for (const f of this.fighters) f.setAim(this.cameraRig.yaw, this.cameraRig.pitch);
     if (this.localFighter && !this.localFighter.alive) this._pickSpectateTarget();
     // 玩家输入频率 30Hz
     this.netInputTimer += dt;
@@ -303,9 +309,16 @@ export class Game {
   }
 
   _applyRemoteIntents() {
+    const now = performance.now();
     for (const [netId, input] of this.remoteInputs) {
       const f = this.fighterByNet.get(netId);
       if (!f || !f.alive) continue;
+      const age = now - (Number(input.receivedAt) || 0);
+      if (!Number.isFinite(age) || age > 450) {
+        f.setIntent(0, 0);
+        if (age > 5000) this.remoteInputs.delete(netId);
+        continue;
+      }
       const yaw = input.yaw || 0;
       const fx = Math.sin(yaw), fz = Math.cos(yaw);
       const rx = -Math.cos(yaw), rz = Math.sin(yaw);
@@ -317,11 +330,13 @@ export class Game {
   /* ================================================================ match start */
   startLocal({ charId = 'zhoutong', mode = 'survival', botCount = 3, training = false, playerName = '' }) {
     const modeId = training ? 'training' : mode;
-    const botTotal = training ? Math.min(3, Math.max(1, botCount || 1)) : botCount;
-    const def = CHARACTER_MAP[charId] || CHARACTERS[0];
+    const botTotal = clamp(parseInt(botCount, 10) || 0, 0, 3);
+    const defId = typeof charId === 'string' && hasOwn(CHARACTER_MAP, charId) ? charId : 'zhoutong';
+    const def = CHARACTER_MAP[defId];
+    const localName = cleanName(playerName, def.name);
     const entries = [{
-      netId: 'local', name: playerName || def.name, defId: def.id, charId: def.id,
-      isBot: false, local: true, charId: def.id,
+      netId: 'local', name: localName || def.name, defId: def.id, charId: def.id,
+      isBot: false, local: true,
     }];
     const others = CHARACTERS.filter((c) => c.id !== def.id);
     const bots = shuffle(others).slice(0, botTotal);
@@ -336,24 +351,30 @@ export class Game {
       localNetId: 'local',
       score: true,
     });
+    if (this.state !== 'playing' || !this.localFighter) return;
     this.ui?.hideMenu?.();
     this.ui?.showGame?.(this);
     this.input.setEnabled(true);
     this.audio?.init();
     this.audio?.startMusic();
     this.pointerHintPending = true;
-    setTimeout(() => {
-      if (this.state === 'playing') this.input.requestLock();
-    }, 350);
   }
 
   startHostedMatch(entries, modeId = 'survival') {
-    const humans = entries.map((e, i) => ({
-      ...e,
-      netId: e.netId || `host-${i}`,
-      defId: e.charId || e.defId || 'zhoutong',
-      local: !!e.local,
-    }));
+    const humans = (Array.isArray(entries) ? entries : [])
+      .filter((e) => e && typeof e === 'object')
+      .slice(0, 4)
+      .map((e, i) => ({
+        ...e,
+        netId: typeof e.netId === 'string' ? e.netId.slice(0, 40) : `host-${i}`,
+        name: cleanName(e.name, '术师'),
+        defId: typeof e.charId === 'string' ? e.charId : (typeof e.defId === 'string' ? e.defId : 'zhoutong'),
+        local: !!e.local,
+      }));
+    if (!humans.length) {
+      this.ui?.toast?.('联机玩家数据异常，无法开始');
+      return;
+    }
     // 用 AI 填满四名术师，保证联机房间不会空场
     let botIndex = 1;
     const used = new Set(humans.map((h) => h.defId));
@@ -376,6 +397,7 @@ export class Game {
       isClient: false,
       localNetId: humans.find((h) => h.local)?.netId || humans[0].netId,
     });
+    if (this.state !== 'playing' || !this.localFighter) return;
     this.ui?.hideMenu?.();
     this.ui?.showGame?.(this);
     this.input.setEnabled(true);
@@ -386,18 +408,40 @@ export class Game {
   }
 
   startClientMatch(payload) {
-    const entries = (payload.players || []).map((p) => ({
+    if (this.state === 'playing') return;
+    const localNetId = typeof payload?.localNetId === 'string' ? payload.localNetId : null;
+    const seen = new Set();
+    const rawEntries = Array.isArray(payload?.players)
+      ? payload.players.filter((p) => {
+        if (!p || typeof p !== 'object' || typeof p.netId !== 'string' || seen.has(p.netId)) return false;
+        seen.add(p.netId);
+        return true;
+      }).slice(0, 4)
+      : [];
+    if (!localNetId || !rawEntries.length || !rawEntries.some((p) => p.netId === localNetId)) {
+      this.ui?.toast?.('联机房间数据异常，已断开');
+      this.network?.leave?.(false);
+      this.state = 'menu';
+      this.input.setEnabled(false);
+      this.ui?.hideGame?.();
+      this.ui?.showMenu?.();
+      return;
+    }
+    const entries = rawEntries.map((p) => ({
       ...p,
-      defId: p.defId || p.charId || 'zhoutong',
-      local: p.netId === payload.localNetId,
+      name: cleanName(p.name, '术师'),
+      defId: typeof p.defId === 'string' ? p.defId : (typeof p.charId === 'string' ? p.charId : 'zhoutong'),
+      isBot: !!p.isBot,
+      local: p.netId === localNetId,
     }));
     this.lastConfig = { network: 'client', mode: payload.mode };
     this.isNetClient = true;
-    this._beginMatch(entries, payload.mode || 'survival', {
+    this._beginMatch(entries, typeof payload.mode === 'string' ? payload.mode : 'survival', {
       isHost: false,
       isClient: true,
-      localNetId: payload.localNetId,
+      localNetId,
     });
+    if (this.state !== 'playing' || !this.localFighter) return;
     this.ui?.hideMenu?.();
     this.ui?.showGame?.(this);
     this.input.setEnabled(true);
@@ -408,13 +452,14 @@ export class Game {
 
   _beginMatch(entries, modeId, opts = {}) {
     this._cleanupMatch();
+    this.matchEpoch++;
     this.state = 'playing';
     this.paused = false;
     this.matchOver = false;
     this.isNetClient = !!opts.isClient;
     this.isNetHost = !!opts.isHost && !this.isNetClient;
-    this.modeId = modeId;
-    this.mode = MODES[modeId] || MODES.survival;
+    this.modeId = hasOwn(MODES, modeId) ? modeId : 'survival';
+    this.mode = MODES[this.modeId];
     this.matchDuration = this.mode.duration;
     this.matchTime = 0;
     this.elapsed = 0;
@@ -434,19 +479,20 @@ export class Game {
     this.ui?.hideTimeStop?.();
 
     const spawnIndices = [0, 1, 2, 3, 4, 5];
-    const ordered = [...entries];
+    const ordered = entries.filter((e) => e && typeof e === 'object').slice(0, 4);
     this.fighters = [];
     this.fighterByNet.clear();
     this.bots = [];
     this.fighterColliderHandles.clear();
     const lives = this.mode.lives === Infinity ? 999 : this.mode.lives;
     ordered.forEach((e, i) => {
-      const def = CHARACTER_MAP[e.defId] || CHARACTERS[i % CHARACTERS.length];
+      const defId = typeof e.defId === 'string' && hasOwn(CHARACTER_MAP, e.defId) ? e.defId : CHARACTERS[i % CHARACTERS.length].id;
+      const def = CHARACTER_MAP[defId];
       const isLocal = !!(e.local || (opts.localNetId && e.netId === opts.localNetId));
       const f = new Fighter(this, def, {
-        id: e.netId || `fighter-${i}`,
-        netId: e.netId || `fighter-${i}`,
-        name: e.name || (isLocal ? '术师' : def.name),
+        id: typeof e.netId === 'string' ? e.netId.slice(0, 40) : `fighter-${i}`,
+        netId: typeof e.netId === 'string' ? e.netId.slice(0, 40) : `fighter-${i}`,
+        name: cleanName(e.name, isLocal ? def.name : `AI·${def.name}`),
         isBot: !!e.isBot,
         isLocal,
         playerColor: PLAYER_COLORS[i % PLAYER_COLORS.length],
@@ -469,6 +515,12 @@ export class Game {
       }
     });
     this.localFighter = this.fighters.find((f) => f.isLocal) || this.fighters[0];
+    if (!this.localFighter) {
+      this.state = 'menu';
+      this.ui?.toast?.('没有可用玩家，已返回大厅');
+      this._cleanupMatch();
+      return;
+    }
     this.localFighter.isLocal = true;
     this.cameraRig.setInitial(this.localFighter.aimYaw);
     this.cameraRig.setFirstPerson(false);
@@ -498,6 +550,12 @@ export class Game {
 
   _cleanupMatch() {
     this.input?.setEnabled(false);
+    this.hudEditing = false;
+    this.paused = false;
+    this.ui?.closeHudEditor?.();
+    this.ui?.hidePause?.();
+    this.ui?.clearTransientHud?.();
+    this.cameraRig.spectateTarget = null;
     for (const p of this.projectiles) this._removeProjectile(p, true);
     this.projectiles = [];
     this.abilities?.clear();
@@ -522,6 +580,7 @@ export class Game {
 
   quitToMenu() {
     this._cleanupMatch();
+    this.matchEpoch++;
     this.state = 'menu';
     this.paused = false;
     this.input.setEnabled(false);
@@ -544,6 +603,7 @@ export class Game {
     f.collider?.setEnabled(false);
     f.visual.group.visible = false;
     f.nameplate.visible = false;
+    this.network?.broadcastEvent?.({ type: 'disconnect', id: netId });
     this.ui?.addKillFeed?.({ type: 'kill', name: '连接中断', target: f.name });
     this.ui?.toast?.(`${f.name} 已断开连接`);
     const alive = this.fighters.filter((x) => !x.eliminated);
@@ -592,18 +652,38 @@ export class Game {
 
   setRemoteInput(netId, input) {
     if (!netId) return;
-    if (input) this.remoteInputs.set(netId, input);
-    else this.remoteInputs.delete(netId);
+    if (input == null) {
+      this.remoteInputs.delete(netId);
+      return;
+    }
+    if (typeof input !== 'object') return;
+    const num = (value, min, max, fallback = 0) => {
+      const n = Number(value);
+      return Number.isFinite(n) ? clamp(n, min, max) : fallback;
+    };
+    this.remoteInputs.set(netId, {
+      x: num(input.x, -1, 1),
+      z: num(input.z, -1, 1),
+      yaw: num(input.yaw, -10000, 10000),
+      pitch: num(input.pitch, -1.2, 1.2),
+      receivedAt: performance.now(),
+    });
   }
 
   remoteAction(netId, action, aim = {}) {
     const f = this.fighterByNet.get(netId);
-    if (!f || !f.alive || this.introTimer > 0) return;
-    if (Number.isFinite(aim.yaw)) f.setAim(aim.yaw, aim.pitch || 0);
+    if (!f || !f.alive || this.introTimer > 0 || this.matchOver || this.state !== 'playing') return;
+    const allowed = new Set(['attack', 'jump', 'dodge', 'q', 'e', 'r']);
+    if (!allowed.has(action)) return;
+    if (aim && typeof aim === 'object') {
+      const yaw = Number(aim.yaw);
+      const pitch = Number(aim.pitch);
+      if (Number.isFinite(yaw) && Number.isFinite(pitch)) f.setAim(yaw, pitch);
+    }
     if (action === 'attack') f.tryAttack();
     else if (action === 'jump') f.queueJump();
     else if (action === 'dodge') f.tryDodge();
-    else if (action === 'q' || action === 'e' || action === 'r') f.trySkill(action);
+    else f.trySkill(action);
   }
 
   isInputBlocked() {
@@ -618,12 +698,22 @@ export class Game {
       this.ui?.showPause?.(true);
       this.input.releaseLock();
       this.audio?.setMusicIntensity(-0.2);
+      this.sendIdleNetworkInput();
     } else {
       this.input.setEnabled(true);
       this.ui?.showPause?.(false);
       this.audio?.setMusicIntensity(0.4);
       this.pointerHintPending = true;
     }
+  }
+
+  sendIdleNetworkInput() {
+    if (!this.isNetClient || !this.network) return;
+    this.network.sendInput?.({
+      x: 0, z: 0,
+      yaw: +this.cameraRig.yaw.toFixed(3),
+      pitch: +this.cameraRig.pitch.toFixed(3),
+    });
   }
 
   openHudEditor() {
@@ -1188,9 +1278,9 @@ export class Game {
   }
 
   onFighterKilled(fighter, source) {
-    if (fighter._killHandled) return;
-    fighter._killHandled = true;
-    setTimeout(() => { fighter._killHandled = false; }, 100);
+    const now = performance.now();
+    if (fighter._killHandledAt && now - fighter._killHandledAt < 100) return;
+    fighter._killHandledAt = now;
     fighter.deaths++;
     if (source && source !== fighter) {
       source.kills++;
@@ -1232,7 +1322,10 @@ export class Game {
     const alive = this.fighters.filter((f) => !f.eliminated);
     if (this.modeId === 'survival' && alive.length <= 1) {
       const winner = alive[0] || null;
-      queueMicrotask(() => this.finishMatch(winner));
+      const epoch = this.matchEpoch;
+      queueMicrotask(() => {
+        if (this.matchEpoch === epoch && !this.matchOver) this.finishMatch(winner);
+      });
     }
     this.ui?.updateScoreboard?.(this);
   }
@@ -1390,17 +1483,40 @@ export class Game {
     }).map((f, i) => ({ f, rank: i + 1 }));
   }
 
+  serializeStandings(standings = this.getStandings()) {
+    return standings.map(({ f, rank }) => ({
+      id: f.netId,
+      rank,
+      name: f.name,
+      defId: f.def.id,
+      kills: f.kills,
+      deaths: f.deaths,
+      score: Math.round(f.score),
+      damageDealt: Math.round(f.damageDealt),
+      destruction: f.destruction,
+      lives: f.lives,
+      eliminated: f.eliminated,
+    }));
+  }
+
   finishMatch(winner) {
-    if (this.matchOver) return;
+    if (this.matchOver || this.state !== 'playing') return;
     this.matchOver = true;
     const standings = this.getStandings();
     if (!winner) winner = standings[0]?.f || null;
     this.state = 'gameover';
     this.input.setEnabled(false);
     this.input.releaseLock();
+    this._clearTimeStopVisuals();
     const isWinner = winner === this.localFighter;
     if (isWinner) this.sound?.win(); else this.sound?.ko();
-    if (this.isNetHost) this.network?.broadcastEvent?.({ type: 'end', winner: winner?.netId || null, standings: standings.map((s) => s.f.netId) });
+    if (this.isNetHost) {
+      this.network?.broadcastEvent?.({
+        type: 'end',
+        winner: winner?.netId || null,
+        standings: this.serializeStandings(standings),
+      });
+    }
     this.ui?.showGameOver?.({
       winner,
       standings,
@@ -1456,40 +1572,55 @@ export class Game {
   }
 
   applyNetworkSnapshot(snap) {
-    if (!snap || !this.isNetClient) return;
-    this.matchTime = snap.t ?? this.matchTime;
-    this.elapsed = snap.elapsed ?? this.elapsed;
-    for (const state of snap.fighters || []) {
+    if (!snap || typeof snap !== 'object' || !this.isNetClient || this.state !== 'playing') return;
+    const t = Number(snap.t);
+    const elapsed = Number(snap.elapsed);
+    if (Number.isFinite(t)) this.matchTime = clamp(t, 0, 36000);
+    if (Number.isFinite(elapsed)) this.elapsed = clamp(elapsed, 0, 36000);
+    for (const state of Array.isArray(snap.fighters) ? snap.fighters.slice(0, 8) : []) {
+      if (!state || typeof state !== 'object') continue;
       const f = this.fighterByNet.get(state.netId) || this.fighters.find((x) => x.netId === state.netId || x.id === state.id);
       if (f) f.applyNetSnapshot(state);
     }
-    if (snap.broken) {
+    if (Array.isArray(snap.broken)) {
       for (const b of this.arena.breakables) {
-        if (!b.broken && snap.broken.includes(b.id)) {
+        if (!b.broken && snap.broken.slice(0, 100).includes(b.id)) {
           this.arena.break(b, { silent: true });
         }
       }
     }
-    // 时停视觉同步
-    if (snap.ts && !this.timeStop) {
-      this.timeStop = { owner: this.fighterByNet.get(snap.ts.owner) || this.localFighter, timeLeft: snap.ts.left, total: snap.ts.total, hits: {}, remote: true };
-      this.postFX?.setTimeStop(true);
-      this.ui?.showTimeStop?.(true);
-      this.sound?.freeze();
-      for (const f of this.fighters) if (f.netId !== snap.ts.owner) f.frozen = true;
-    } else if (!snap.ts && this.timeStop?.remote) {
+    // 时停视觉同步（严格验证数值，避免异常快照破坏 HUD）
+    const ts = snap.ts && typeof snap.ts === 'object' ? snap.ts : null;
+    const tsLeft = Number(ts?.left);
+    const tsTotal = Number(ts?.total);
+    const tsOwner = ts ? this.fighterByNet.get(ts.owner) : null;
+    if (ts && tsOwner && Number.isFinite(tsLeft) && tsLeft > 0) {
+      const left = clamp(tsLeft, 0, 10);
+      const total = Number.isFinite(tsTotal) ? clamp(tsTotal, 0.1, 10) : 3.5;
+      if (!this.timeStop) {
+        this.timeStop = { owner: tsOwner, timeLeft: left, total, hits: {}, remote: true };
+        this.postFX?.setTimeStop(true);
+        this.ui?.showTimeStop?.(true);
+        this.sound?.freeze();
+        for (const f of this.fighters) if (f.netId !== ts.owner) f.frozen = true;
+      } else {
+        this.timeStop.timeLeft = left;
+        this.timeStop.total = total;
+      }
+      this.ui?.updateTimeStop?.(left, total);
+    } else if (this.timeStop?.remote) {
       this.timeStop = null;
       this.postFX?.setTimeStop(false);
       this.ui?.showTimeStop?.(false);
       for (const f of this.fighters) f.frozen = false;
       this.sound?.unfreeze();
     }
-    if (snap.ts) this.ui?.updateTimeStop?.(snap.ts.left, snap.ts.total);
     this.ui?.updateFromSnapshot?.(snap);
   }
 
   handleNetworkEvent(evt) {
-    if (!evt) return;
+    if (!evt || typeof evt !== 'object') return;
+    if (this.state !== 'playing' && evt.type !== 'end') return;
     if (evt.type === 'ability') {
       this.playRemoteAbility(evt);
     } else if (evt.type === 'basic') {
@@ -1497,7 +1628,12 @@ export class Game {
     } else if (evt.type === 'timestop') {
       if (evt.active) {
         if (!this.timeStop) {
-          this.timeStop = { owner: this.fighterByNet.get(evt.owner) || this.localFighter, timeLeft: evt.duration || 3.5, total: 3.5, hits: {}, remote: true };
+          const duration = Number(evt.duration);
+          this.timeStop = {
+            owner: this.fighterByNet.get(evt.owner) || this.localFighter,
+            timeLeft: Number.isFinite(duration) ? clamp(duration, 0.2, 10) : 3.5,
+            total: 3.5, hits: {}, remote: true,
+          };
           this.postFX?.setTimeStop(true);
           this.ui?.showTimeStop?.(true);
           this.sound?.freeze();
@@ -1513,10 +1649,22 @@ export class Game {
       this.finishFromNet(evt);
     } else if (evt.type === 'hit') {
       const f = this.fighterByNet.get(evt.id);
-      if (f) this.effects.hitSpark(f.pos.clone().setY(f.pos.y + 1.3), evt.color || 0xffffff, evt.dmg || 10);
+      if (f) this.effects.hitSpark(f.pos.clone().setY(f.pos.y + 1.3), Number.isFinite(Number(evt.color)) ? Number(evt.color) : 0xffffff, clamp(Number(evt.dmg) || 10, 1, 999));
     } else if (evt.type === 'break') {
       const b = this.arena.breakables.find((x) => x.id === evt.id);
       if (b && !b.broken) this.arena.break(b, { silent: true });
+    } else if (evt.type === 'disconnect') {
+      const f = this.fighterByNet.get(evt.id);
+      if (f) {
+        f.eliminated = true;
+        f.dead = true;
+        f.hp = 0;
+        f.collider?.setEnabled(false);
+        f.visual.group.visible = false;
+        f.nameplate.visible = false;
+        this.remoteInputs.delete(evt.id);
+        this.ui?.addKillFeed?.({ type: 'kill', name: '连接中断', target: f.name });
+      }
     } else if (evt.type === 'kill') {
       const target = this.fighterByNet.get(evt.id);
       const source = evt.source ? this.fighterByNet.get(evt.source) : null;
@@ -1532,9 +1680,12 @@ export class Game {
 
   playRemoteAbility(evt) {
     const f = this.fighterByNet.get(evt.id);
-    if (!f) return;
+    if (!f || !['q', 'e', 'r'].includes(evt.slot)) return;
     const def = f.def;
-    const point = evt.point ? new THREE.Vector3(evt.point[0], evt.point[1], evt.point[2]) : f.pos.clone();
+    const pointRaw = Array.isArray(evt.point) ? evt.point : null;
+    const point = pointRaw && pointRaw.length >= 3 && pointRaw.slice(0, 3).every((v) => Number.isFinite(Number(v)))
+      ? new THREE.Vector3(Number(pointRaw[0]), Number(pointRaw[1]), Number(pointRaw[2]))
+      : f.pos.clone();
     const slot = evt.slot;
     if (slot === 'r') {
       if (def.id === 'zhoutong') {
@@ -1562,8 +1713,17 @@ export class Game {
   playRemoteBasic(evt) {
     const f = this.fighterByNet.get(evt.id);
     if (!f) return;
-    const origin = new THREE.Vector3(evt.origin?.[0] || f.pos.x, evt.origin?.[1] || f.pos.y + 1.2, evt.origin?.[2] || f.pos.z);
-    const dir = new THREE.Vector3(evt.dir?.[0] || 0, evt.dir?.[1] || 0, evt.dir?.[2] || 1).normalize();
+    const safe = (v, fallback) => Number.isFinite(Number(v)) ? Number(v) : fallback;
+    const origin = new THREE.Vector3(
+      safe(evt.origin?.[0], f.pos.x),
+      safe(evt.origin?.[1], f.pos.y + 1.2),
+      safe(evt.origin?.[2], f.pos.z)
+    );
+    const dir = new THREE.Vector3(
+      safe(evt.dir?.[0], 0),
+      safe(evt.dir?.[1], 0),
+      safe(evt.dir?.[2], 1)
+    ).normalize();
     if (evt.char === 'guojunxi') {
       const start = f.pos.clone().setY(f.pos.y + 1.2).addScaledVector(dir, 0.7);
       this.effects.slash(start, 0x5af2ff, { radius: 2.2, duration: 0.25, angle: Math.PI * 1.2 });
@@ -1578,17 +1738,55 @@ export class Game {
   }
 
   finishFromNet(evt) {
-    if (this.matchOver) return;
-    const winner = evt.winner ? this.fighterByNet.get(evt.winner) : null;
+    if (this.matchOver || this.state !== 'playing') return;
+    const remoteStandings = Array.isArray(evt.standings) ? evt.standings.slice(0, 8) : null;    if (remoteStandings) {
+      for (const row of remoteStandings) {
+        if (!row || typeof row.id !== 'string') continue;
+        const f = this.fighterByNet.get(row.id);
+        if (!f) continue;
+        f.kills = clamp(Number(row.kills) || 0, 0, 99999);
+        f.deaths = clamp(Number(row.deaths) || 0, 0, 99999);
+        f.score = clamp(Number(row.score) || 0, 0, 9999999);
+        f.damageDealt = clamp(Number(row.damageDealt) || 0, 0, 9999999);
+        f.destruction = clamp(Number(row.destruction) || 0, 0, 9999);
+        f.lives = clamp(Number(row.lives) || 0, 0, 999);
+        f.eliminated = !!row.eliminated;
+      }
+    }
+    let standings = this.getStandings();
+    if (remoteStandings) {
+      const order = new Map(remoteStandings.map((row) => [row.id, clamp(Number(row.rank) || 999, 1, 999)]));
+      const mapped = remoteStandings
+        .map((row) => {
+          const f = this.fighterByNet.get(row.id);
+          return f ? { f, rank: order.get(row.id) } : null;
+        })
+        .filter(Boolean)
+        .sort((a, b) => a.rank - b.rank);
+      if (mapped.length) standings = mapped;
+    }
+    const winner = evt.winner
+      ? (this.fighterByNet.get(evt.winner) || standings[0]?.f || null)
+      : (standings[0]?.f || null);
     this.matchOver = true;
     this.state = 'gameover';
     this.input.setEnabled(false);
-    const standings = this.getStandings();
+    this._clearTimeStopVisuals();
+    const isWinner = winner === this.localFighter;
+    if (isWinner) this.sound?.win(); else this.sound?.ko();
     this.ui?.showGameOver?.({
       winner, standings, local: this.localFighter, mode: this.mode,
-      matchTime: this.matchTime, isWinner: winner === this.localFighter, network: true,
+      matchTime: this.matchTime, isWinner, network: true,
     });
     this._gameOverWinner = winner;
+    this.cameraRig.spectateTarget = winner;
+  }
+
+  _clearTimeStopVisuals() {
+    this.timeStop = null;
+    for (const f of this.fighters) f.frozen = false;
+    this.postFX?.setTimeStop(false);
+    this.ui?.hideTimeStop?.();
   }
 }
 

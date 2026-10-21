@@ -901,3 +901,51 @@ body.hud-editing .touch-layer { pointer-events: none; }
 @media (max-width: 600px) {
   .hud-editor-panel { width: min(260px, 78vw); bottom: calc(6px + var(--safe-b)); }
 }
+
+/* ===== fullscreen & mouse capture ===== */
+.icon-btn.active, .hud-icon-btn.active {
+  color: #061013;
+  border-color: var(--cyan);
+  background: var(--cyan);
+  box-shadow: 0 0 14px rgba(90, 242, 255, .38);
+}
+#btn-fullscreen-top { font-size: 18px; line-height: 1; }
+#btn-fullscreen-hud { font-size: 17px; line-height: 1; }
+#pointer-hint {
+  pointer-events: auto;
+  cursor: pointer;
+  appearance: none;
+  -webkit-appearance: none;
+  font-family: var(--font-body);
+  text-align: center;
+  color: #fff;
+  background: rgba(8, 7, 13, .86);
+  border: 1px solid rgba(255, 255, 255, .24);
+  box-shadow: 0 8px 26px rgba(0,0,0,.3), 0 0 20px rgba(90,242,255,.05);
+  transition: border-color .2s, background .2s, transform .2s;
+}
+#pointer-hint:hover {
+  border-color: var(--cyan);
+  background: rgba(8, 15, 20, .94);
+}
+#pointer-hint:active { transform: translateX(-50%) scale(.97); }
+#pointer-hint span { color: var(--paper); font-size: 11px; letter-spacing: .08em; }
+#pointer-hint small { color: var(--muted); }
+#pointer-hint.error { border-color: rgba(255, 46, 99, .6); }
+#pointer-hint.error span { color: var(--pink-soft); }
+body.is-fullscreen #pointer-hint { top: 66%; }
+@media (max-height: 520px) {
+  #pointer-hint { top: 54%; padding: 6px 12px; }
+  #pointer-hint small { display: none; }
+}
+
+/* Optional TURN / advanced network settings */
+.net-advanced { margin-top: 13px; border: 1px solid var(--line); background: rgba(255,255,255,.018); }
+.net-advanced summary { cursor: pointer; padding: 8px 11px; font-family: var(--font-mono); font-size: 8px; letter-spacing: .08em; color: var(--muted); }
+.net-advanced summary:hover { color: var(--paper); }
+.net-advanced p { margin: 0 11px 6px; color: var(--dim); font-size: 8.5px; line-height: 1.6; }
+.net-advanced-grid { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 8px; padding: 0 11px 11px; }
+.net-advanced-grid label { display: flex; flex-direction: column; gap: 4px; font-size: 8px; color: var(--muted); }
+.net-advanced-grid input { background: rgba(255,255,255,.04); border: 1px solid var(--line); padding: 7px 8px; font-size: 10px; color: var(--paper); min-width: 0; }
+.net-advanced-grid input:focus { border-color: var(--gold); outline: none; }
+@media (max-width: 760px) { .net-advanced-grid { grid-template-columns: 1fr; } }

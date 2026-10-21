@@ -929,8 +929,11 @@ export class Arena {
     b.broken = true;
     b.group.visible = false;
     if (b.body) {
-      try { this.world.removeRigidBody(b.body); } catch (e) { /* already removed */ }
+      const body = b.body;
+      try { this.world.removeRigidBody(body); } catch (e) { /* already removed */ }
       b.body = null;
+      // 移除对已销毁刚体的引用，避免反复重开后 statics 数组无限增长
+      this.statics = this.statics.filter((s) => s.body !== body);
     }
     const center = b.center.clone();
     const count = b.type === 'glass' ? 16 : b.type === 'car' ? 12 : b.type === 'crate' ? 8 : 10;

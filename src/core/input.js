@@ -12,6 +12,7 @@ const KEY_ACTIONS = {
   KeyE: 'e',
   KeyR: 'r',
   KeyV: 'camera',
+  KeyP: 'pause',
   Escape: 'pause',
   Tab: 'scoreboard',
   KeyH: 'hudhelp',
@@ -26,12 +27,38 @@ export class Input {
     this.mouseDY = 0;
     this.mouseDown = false;
     this.enabled = false;
-    this.touch = matchMedia('(pointer: coarse)').matches || navigator.maxTouchPoints > 0;
-    this.isMobile = this.touch;
+    const coarse = matchMedia('(pointer: coarse)').matches;
+    const fine = matchMedia('(pointer: fine)').matches;
+    const noHover = matchMedia('(hover: none)').matches;
+    this.hasTouch = navigator.maxTouchPoints > 0;
+    // 触屏笔记本/一体机的主指针通常是 fine；不能仅凭 maxTouchPoints 就判定为手机
+    this.isMobile = (coarse && !fine) || (noHover && this.hasTouch);
+    this.touch = this.isMobile;
+    this._queryCoarse = matchMedia('(pointer: coarse)');
+    this._queryFine = matchMedia('(pointer: fine)');
+    this._queryHover = matchMedia('(hover: none)');
+    this._recomputeMode = () => {
+      const next = (this._queryCoarse.matches && !this._queryFine.matches) || (this._queryHover.matches && this.hasTouch);
+      if (next === this.isMobile) return;
+      this.isMobile = next;
+      this.touch = next;
+      if (next) this.releaseLock();
+      this.game.ui?.setTouchMode?.(next);
+    };
+    for (const q of [this._queryCoarse, this._queryFine, this._queryHover]) {
+      if (q.addEventListener) q.addEventListener('change', this._recomputeMode);
+      else q.addListener?.(this._recomputeMode);
+    }
+    this._skipMouse = 0;
     this.joy = { x: 0, y: 0, active: false, id: null, baseX: 0, baseY: 0 };
     this.lookTouches = new Map();
     this.pointerLocked = false;
     this.wasLocked = false;
+    this.lockSupported = !!(canvas.requestPointerLock || canvas.webkitRequestPointerLock);
+    this.lockError = !this.lockSupported;
+    this._lockTimer = null;
+    this.dragLook = null;
+    this.rmbDown = false;
     this.joystickEl = document.getElementById('joystick');
     this.joystickKnob = document.getElementById('joystick-knob');
     this.touchLayer = document.getElementById('touch-layer');
@@ -60,37 +87,117 @@ export class Input {
     window.addEventListener('blur', () => {
       this.keys.clear();
       this.mouseDown = false;
+      this.rmbDown = false;
+      this.dragLook = null;
       this.joy.active = false;
       this.joy.x = this.joy.y = 0;
     });
 
     this.canvas.addEventListener('mousedown', (e) => {
-      if (!this.enabled || e.button !== 0) return;
-      if (this.isMobile && this.touch) return;
-      if (!this.pointerLocked) {
-        this.requestLock();
+      if (!this.enabled) return;
+      if (e.button === 2) {
+        e.preventDefault();
+        this.rmbDown = true;
+        this._startDragLook(e, 2);
         return;
       }
-      this.mouseDown = true;
-      this.game.handleAction('attack');
+      if (e.button !== 0) return;
+      if (this.pointerLocked) {
+        this.mouseDown = true;
+        this.game.handleAction('attack');
+        return;
+      }
+      // 未锁定鼠标时：先进入拖拽视角状态。锁定成功后会切换为原生鼠标视角；
+      // 若浏览器拒绝 Pointer Lock，右键/左键拖拽仍然可以控制视角。
+      this._startDragLook(e, 0);
+      if (this.lockError) {
+        this.mouseDown = true;
+        this.game.handleAction('attack');
+      } else {
+        this.requestLock();
+      }
     });
-    window.addEventListener('mouseup', (e) => { if (e.button === 0) this.mouseDown = false; });
+    window.addEventListener('mouseup', (e) => {
+      if (e.button === 0) this.mouseDown = false;
+      if (e.button === 2) this.rmbDown = false;
+      if (this.dragLook && this.dragLook.button === e.button) this.dragLook = null;
+      if (e.buttons === 0) {
+        this.rmbDown = false;
+        this.dragLook = null;
+      }
+    });
     this.canvas.addEventListener('contextmenu', (e) => e.preventDefault());
     document.addEventListener('mousemove', (e) => {
-      if (!this.pointerLocked || !this.enabled) return;
-      this.mouseDX += e.movementX || 0;
-      this.mouseDY += e.movementY || 0;
+      if (!this.enabled) return;
+      if (this.pointerLocked) {
+        if (this._skipMouse > 0) { this._skipMouse--; return; }
+        this.mouseDX += clamp(e.movementX || 0, -250, 250);
+        this.mouseDY += clamp(e.movementY || 0, -250, 250);
+        return;
+      }
+      if (!this.dragLook) return;
+      const dx = (e.clientX - this.dragLook.lastX);
+      const dy = (e.clientY - this.dragLook.lastY);
+      this.dragLook.lastX = e.clientX;
+      this.dragLook.lastY = e.clientY;
+      this.dragLook.moved += Math.abs(dx) + Math.abs(dy);
+      this.mouseDX += clamp(dx, -250, 250) * 1.15;
+      this.mouseDY += clamp(dy, -250, 250) * 1.15;
     });
-    document.addEventListener('pointerlockchange', () => {
-      this.pointerLocked = document.pointerLockElement === this.canvas;
-      this.game.ui?.setPointerLock(this.pointerLocked);
-      if (this.pointerLocked) this.wasLocked = true;
-    });
-    this.canvas.addEventListener('click', () => {
-      if (this.enabled && !this.pointerLocked && !this.isMobile) this.requestLock();
-    });
+    const onLockChange = () => {
+      const locked = document.pointerLockElement === this.canvas || document.webkitPointerLockElement === this.canvas;
+      const wasLocked = this.wasLocked;
+      this.pointerLocked = locked;
+      if (locked) {
+        this.lockError = false;
+        this.dragLook = null;
+        this.wasLocked = true;
+        this._skipMouse = 1;
+        if (this._lockTimer) clearTimeout(this._lockTimer);
+        this._lockTimer = null;
+      } else {
+        this.wasLocked = false;
+        this.mouseDX = 0;
+        this.mouseDY = 0;
+        this.dragLook = null;
+        this.keys.clear();
+        // Escape 在 Pointer Lock 下通常不会派发 keydown。单人模式下自动暂停；
+        // 联机时不能暂停房主/其他人的对局，因此保留“点击锁定”提示和拖拽备用视角。
+        if (wasLocked && this.enabled && this.game?.state === 'playing' && !this.game.paused && !this.game.hudEditing) {
+          const networked = !!this.game.network?.started;
+          if (!networked) {
+            setTimeout(() => {
+              if (!this.pointerLocked && this.enabled && this.game?.state === 'playing' && !this.game.paused && !this.game.hudEditing) {
+                this.game.pause(true);
+              }
+            }, 30);
+          } else {
+            this.game?.sendIdleNetworkInput?.();
+          }
+        }
+      }
+      this.game.ui?.setPointerLock(locked);
+    };
+    document.addEventListener('pointerlockchange', onLockChange);
+    document.addEventListener('webkitpointerlockchange', onLockChange);
+    const onLockError = () => {
+      this.lockError = true;
+      this.pointerLocked = false;
+      this.game.ui?.onPointerLockError?.();
+    };
+    document.addEventListener('pointerlockerror', onLockError);
+    document.addEventListener('webkitpointerlockerror', onLockError);
 
     this._bindTouch();
+  }
+
+  _startDragLook(event, button) {
+    this.dragLook = {
+      button,
+      lastX: event.clientX,
+      lastY: event.clientY,
+      moved: 0,
+    };
   }
 
   _bindTouch() {
@@ -173,13 +280,44 @@ export class Input {
   }
 
   requestLock() {
-    if (this.isMobile) return;
-    const promise = this.canvas.requestPointerLock?.();
-    if (promise?.catch) promise.catch(() => {});
+    if (this.isMobile) return false;
+    if (!this.enabled || !this.game || this.game.state !== 'playing' || this.game.paused || this.game.hudEditing) return false;
+    const fn = this.canvas.requestPointerLock || this.canvas.webkitRequestPointerLock;
+    if (!fn) {
+      this.lockError = true;
+      this.game.ui?.onPointerLockError?.();
+      return false;
+    }
+    try {
+      const result = fn.call(this.canvas);
+      this.lockError = false;
+      if (this._lockTimer) clearTimeout(this._lockTimer);
+      this._lockTimer = setTimeout(() => {
+        this._lockTimer = null;
+        if (!this.pointerLocked) {
+          this.lockError = true;
+          this.game.ui?.onPointerLockError?.();
+        }
+      }, 900);
+      if (result?.catch) {
+        result.catch(() => {
+          this.lockError = true;
+          if (this._lockTimer) clearTimeout(this._lockTimer);
+          this._lockTimer = null;
+          this.game.ui?.onPointerLockError?.();
+        });
+      }
+      return true;
+    } catch (e) {
+      this.lockError = true;
+      this.game.ui?.onPointerLockError?.();
+      return false;
+    }
   }
 
   releaseLock() {
     if (document.pointerLockElement === this.canvas) document.exitPointerLock?.();
+    else if (document.webkitPointerLockElement === this.canvas) document.webkitExitPointerLock?.();
   }
 
   setEnabled(v) {
@@ -187,6 +325,13 @@ export class Input {
     if (!v) this.releaseLock();
     if (!v) {
       this.keys.clear();
+      this.mouseDown = false;
+      this.rmbDown = false;
+      this.dragLook = null;
+      this.mouseDX = 0;
+      this.mouseDY = 0;
+      if (this._lockTimer) clearTimeout(this._lockTimer);
+      this._lockTimer = null;
       this.joy.active = false;
       this.joy.x = this.joy.y = 0;
       this.lookTouches.clear();

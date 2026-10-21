@@ -1,9 +1,10 @@
 import { CHARACTERS, CHARACTER_MAP } from '../data/characters.js';
-import { clamp, damp, formatTime, makeId } from '../core/utils.js';
+import { clamp, damp, formatTime } from '../core/utils.js';
 
 const STORAGE_SETTINGS = 'shibuya_settings_v1';
 const STORAGE_HUD = 'shibuya_hud_layout_v1';
 const STORAGE_NAME = 'shibuya_player_name';
+const STORAGE_TURN = 'shibuya_turn_v1';
 
 const CONTROL_NAMES = {
   attack: '普攻', jump: '跳跃', dodge: '闪避',
@@ -39,7 +40,12 @@ export class UI {
     this.frameCount = 0;
     this.damageNumbers = [];
     this.scoreboardVisible = false;
-    this.isTouch = (matchMedia('(pointer: coarse)').matches && navigator.maxTouchPoints > 0) || (navigator.maxTouchPoints > 0 && window.innerWidth < 1100);
+    this.isTouch = (() => {
+      const coarse = matchMedia('(pointer: coarse)').matches;
+      const fine = matchMedia('(pointer: fine)').matches;
+      const noHover = matchMedia('(hover: none)').matches;
+      return (coarse && !fine) || (noHover && navigator.maxTouchPoints > 0);
+    })();
     this.config = this._loadJSON(STORAGE_SETTINGS, { sens: 1, volume: 70, bloom: 55, quality: 'midt' });
     this.layout = { ...DEFAULT_LAYOUT, ...this._loadJSON(STORAGE_HUD, {}) };
     for (const key of Object.keys(DEFAULT_LAYOUT)) {
@@ -57,6 +63,7 @@ export class UI {
     this._buildMenu();
     this._bindMenu();
     this._bindHUD();
+    this._bindFullscreen();
     this._bindSettings();
     this._bindNet();
     this._bindHudEditor();
@@ -65,7 +72,6 @@ export class UI {
     this.applyLayout();
     this.applySettings();
     this.selectCharacter(this.selectedChar, true);
-    if (this.isTouch) document.body.classList.add('is-touch');
   }
 
   /* ================================================================ helpers */
@@ -143,11 +149,6 @@ export class UI {
       body.classList.add('is-touch');
       document.documentElement.style.setProperty('--touch', '1');
     }
-    window.addEventListener('orientationchange', () => {
-      setTimeout(() => {
-        if (matchMedia('(pointer: coarse)').matches) document.body.classList.add('is-touch');
-      }, 200);
-    });
   }
 
   _bindMenu() {
@@ -219,13 +220,13 @@ export class UI {
     const s = this.getSelection();
     this.hideMenu();
     this.hideNet();
-    if (!this.isTouch) this.game.input?.requestLock?.();
     this.game.startLocal({
       charId: s.charId,
       mode: s.mode,
       botCount: training ? 1 : s.botCount,
       training,
     });
+    if (!this.isTouch) this.game.input?.requestLock?.();
   }
 
   showMenu() {
@@ -240,6 +241,7 @@ export class UI {
     this.hideSpectate();
     this.scoreboardVisible = false;
     this._el('scoreboard-overlay')?.classList.add('hidden');
+    this.clearTransientHud();
     this.setPointerLock(true);
     this.preview?.setActive(true);
     this.local = null;
@@ -263,6 +265,7 @@ export class UI {
     this.game = game;
     this.local = game.localFighter;
     if (!this.local) return;
+    this.clearTransientHud();
     const def = this.local.def;
     this._el('hud').classList.remove('hidden');
     this._el('hud').classList.remove('hidden');
@@ -594,11 +597,35 @@ export class UI {
     }
     feed.prepend(item);
     while (feed.children.length > 5) feed.lastElementChild.remove();
-    setTimeout(() => {
+    const fadeTimer = setTimeout(() => {
       item.style.opacity = '0';
       item.style.transition = 'opacity .3s';
-      setTimeout(() => item.remove(), 320);
+      const removeTimer = setTimeout(() => item.remove(), 320);
+      this._killTimers.push(removeTimer);
     }, 4200);
+    this._killTimers.push(fadeTimer);
+    if (this._killTimers.length > 30) this._killTimers.splice(0, this._killTimers.length - 30);
+  }
+
+  clearTransientHud() {
+    for (const timer of this._killTimers) clearTimeout(timer);
+    this._killTimers = [];
+    const feed = this._el('killfeed');
+    if (feed) feed.innerHTML = '';
+    for (const d of this.damageNumbers) d.el?.remove?.();
+    this.damageNumbers = [];
+    const damage = this._el('damage-layer');
+    if (damage) damage.innerHTML = '';
+    const callout = this._el('center-callout');
+    if (callout) {
+      callout.classList.remove('show');
+      callout.innerHTML = '';
+    }
+    clearTimeout(this._calloutTimer);
+    this._calloutTimer = null;
+    this.hideTimeStop();
+    this.scoreboardVisible = false;
+    this._el('scoreboard-overlay')?.classList.add('hidden');
   }
 
   setCameraMode(fpp) {
@@ -606,11 +633,33 @@ export class UI {
     if (el) el.innerHTML = `视角 <b>${fpp ? 'FPP' : 'OTS'}</b>`;
   }
 
+  setTouchMode(isTouch) {
+    this.isTouch = !!isTouch;
+    document.body.classList.toggle('is-touch', this.isTouch);
+    if (this.isTouch) this.game?.input?.releaseLock();
+    this.setPointerLock(!!this.game?.input?.pointerLocked);
+  }
+
   setPointerLock(locked) {
     const hint = this._el('pointer-hint');
     if (!hint) return;
     const show = this.game?.state === 'playing' && !this.game.paused && !this.isTouch && !locked;
     hint.classList.toggle('hidden', !show);
+    hint.classList.toggle('error', !!this.game?.input?.lockError);
+    const title = this._el('pointer-hint-title');
+    const sub = this._el('pointer-hint-sub');
+    if (this.game?.input?.lockError) {
+      if (title) title.textContent = '鼠标锁定失败 · 可右键拖动';
+      if (sub) sub.textContent = '点击此处重试 · 左键攻击';
+    } else {
+      if (title) title.textContent = '点击锁定鼠标视角';
+      if (sub) sub.textContent = '也可按住右键拖动 · P 暂停';
+    }
+  }
+
+  onPointerLockError() {
+    this.setPointerLock(false);
+    this.toast('浏览器未允许锁定鼠标，已启用“按住右键拖动视角”备用操作');
   }
 
   updateTimeStop(left, total) {
@@ -924,8 +973,16 @@ export class UI {
       if (this.game?.state !== 'playing') return;
       this.game.openHudEditor();
     });
-    this._el('btn-rematch').addEventListener('click', () => this.game?.rematch());
+    this._el('btn-rematch').addEventListener('click', () => {
+      this.game?.rematch();
+      if (!this.isTouch) this.game?.input?.requestLock?.();
+    });
     this._el('btn-back-menu').addEventListener('click', () => this.game?.quitToMenu());
+    this._el('pointer-hint').addEventListener('click', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      this.game?.input?.requestLock?.();
+    });
     // 移动端动作键
     document.querySelectorAll('.act-btn').forEach((btn) => {
       btn.addEventListener('pointerdown', (e) => {
@@ -940,8 +997,99 @@ export class UI {
       btn.addEventListener('click', (e) => { e.preventDefault(); e.stopPropagation(); });
     });
     // 帮助遮罩关闭
-    this._el('btn-help-close').addEventListener('click', () => this.closeHelp());
     this._el('help-modal').querySelector('.modal-backdrop')?.addEventListener('click', () => this.closeHelp());
+  }
+
+  /* ================================================================ fullscreen */
+  _bindFullscreen() {
+    const el = document.documentElement;
+    this._fullscreenSupported = !!(el.requestFullscreen || el.webkitRequestFullscreen);
+    const buttons = ['btn-fullscreen-top', 'btn-fullscreen-hud'].map((id) => this._el(id)).filter(Boolean);
+    for (const btn of buttons) {
+      btn.addEventListener('click', (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        this.toggleFullscreen();
+      });
+    }
+    const update = () => {
+      this._updateFullscreenUI();
+      this.game?._onResize?.();
+    };
+    document.addEventListener('fullscreenchange', update);
+    document.addEventListener('webkitfullscreenchange', update);
+    document.addEventListener('fullscreenerror', () => this.toast('浏览器拒绝进入全屏'));
+    document.addEventListener('webkitfullscreenerror', () => this.toast('浏览器拒绝进入全屏'));
+    this._updateFullscreenUI();
+    window.addEventListener('keydown', (e) => {
+      if (e.code !== 'KeyF' || e.repeat || e.ctrlKey || e.metaKey || e.altKey) return;
+      const target = e.target instanceof Element ? e.target.closest('input, textarea, select, [contenteditable="true"], [contenteditable=""]') : null;
+      if (target) return;
+      e.preventDefault();
+      this.toggleFullscreen();
+    });
+  }
+
+  _fullscreenElement() {
+    return document.fullscreenElement || document.webkitFullscreenElement || null;
+  }
+
+  async toggleFullscreen() {
+    if (this._fsBusy) return;
+    if (!this._fullscreenSupported) {
+      this.toast('当前浏览器不支持网页全屏；iPhone 可“添加到主屏幕”后打开');
+      return;
+    }
+    this._fsBusy = true;
+    try {
+      if (this._fullscreenElement()) {
+        const exit = document.exitFullscreen || document.webkitExitFullscreen;
+        if (exit) {
+          const result = exit.call(document);
+          if (result?.then) await result;
+        }
+        if (screen.orientation?.unlock) {
+          try { screen.orientation.unlock(); } catch (e) { /* ignore */ }
+        }
+        this.game?.audio?.click?.();
+      } else {
+        const el = document.documentElement;
+        const request = el.requestFullscreen || el.webkitRequestFullscreen;
+        if (!request) {
+          this.toast('当前浏览器不支持网页全屏；iPhone 可“添加到主屏幕”后打开');
+          return;
+        }
+        const result = request.call(el);
+        if (result?.then) await result;
+        this.game?.audio?.click?.();
+        if (this.isTouch && screen.orientation?.lock) {
+          try { await screen.orientation.lock('landscape'); } catch (e) { /* ignore */ }
+        }
+      }
+    } catch (e) {
+      this.toast(`全屏切换失败：${e?.message || '浏览器拒绝请求'}`);
+    } finally {
+      this._fsBusy = false;
+      this._updateFullscreenUI();
+      this.game?._onResize?.();
+    }
+  }
+
+  _updateFullscreenUI() {
+    const active = !!this._fullscreenElement();
+    document.body.classList.toggle('is-fullscreen', active);
+    if (!active && screen.orientation?.unlock) {
+      try { screen.orientation.unlock(); } catch (e) { /* ignore */ }
+    }
+    for (const id of ['btn-fullscreen-top', 'btn-fullscreen-hud']) {
+      const btn = this._el(id);
+      if (!btn) continue;
+      btn.style.display = this._fullscreenSupported ? '' : 'none';
+      btn.classList.toggle('active', active);
+      btn.setAttribute('aria-pressed', active ? 'true' : 'false');
+      btn.title = active ? '退出全屏 (F)' : '全屏 (F)';
+      btn.setAttribute('aria-label', active ? '退出全屏' : '进入全屏');
+    }
   }
 
   /* ================================================================ HUD editor */
@@ -1079,6 +1227,10 @@ export class UI {
     const roomInput = this._el('net-room');
     try { nameInput.value = localStorage.getItem(STORAGE_NAME) || ''; } catch (e) { /* noop */ }
     const query = new URLSearchParams(location.search);
+    const turn = this._loadJSON(STORAGE_TURN, { url: '', user: '', pass: '' });
+    this._el('net-turn-url').value = turn.url || '';
+    this._el('net-turn-user').value = turn.user || '';
+    this._el('net-turn-pass').value = turn.pass || '';
     if (query.get('room')) {
       const inviteRoom = query.get('room').toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 6);
       roomInput.value = inviteRoom;
@@ -1109,13 +1261,39 @@ export class UI {
     return name;
   }
 
+  _saveTurnConfig() {
+    const data = {
+      url: (this._el('net-turn-url').value || '').trim().slice(0, 300),
+      user: (this._el('net-turn-user').value || '').trim().slice(0, 120),
+      pass: (this._el('net-turn-pass').value || '').trim().slice(0, 200),
+    };
+    this._saveJSON(STORAGE_TURN, data);
+    return data;
+  }
+
+  getTurnConfig() {
+    const data = this._saveTurnConfig();
+    if (!data.url) return null;
+    const urls = data.url.split(',').map((u) => u.trim()).filter(Boolean).slice(0, 4);
+    if (!urls.length || urls.some((u) => !/^turns?:/i.test(u))) {
+      this.setNetStatus('TURN 地址必须为 turn: 或 turns: 开头；留空则仅使用 STUN 直连。', 'err');
+      return null;
+    }
+    return { urls, username: data.user, credential: data.pass };
+  }
+
   _netHost() {
     if (!this.network) { this.setNetStatus('联机模块尚未初始化', 'err'); return; }
     const name = this._sanitizeName();
+    const turnUrlField = (this._el('net-turn-url').value || '').trim();
+    if (turnUrlField && !this.getTurnConfig()) return;
     let code = (this._el('net-room').value || '').trim().toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 6);
+    if (code && code.length !== 6) { this.setNetStatus('房间码必须为 6 位字母或数字', 'err'); return; }
     if (!code) {
-      code = makeId('').toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 5);
-      while (code.length < 5) code += 'X';
+      const alphabet = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+      const bytes = new Uint8Array(6);
+      crypto.getRandomValues(bytes);
+      code = Array.from(bytes, (b) => alphabet[b % alphabet.length]).join('');
       this._el('net-room').value = code;
     }
     this._netIsHost = true;
@@ -1127,8 +1305,10 @@ export class UI {
   _netJoin() {
     if (!this.network) { this.setNetStatus('联机模块尚未初始化', 'err'); return; }
     const name = this._sanitizeName();
+    const turnUrlField = (this._el('net-turn-url').value || '').trim();
+    if (turnUrlField && !this.getTurnConfig()) return;
     const code = (this._el('net-room').value || '').trim().toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 6);
-    if (code.length < 4) { this.setNetStatus('请输入 4-6 位房间码', 'err'); return; }
+    if (code.length !== 6) { this.setNetStatus('请输入 6 位房间码', 'err'); return; }
     this._netIsHost = false;
     this.setNetStatus('正在连接房主…', 'connecting');
     this.network.join(code, name, this.getSelection());
@@ -1166,7 +1346,8 @@ export class UI {
       const row = document.createElement('div');
       row.className = `lobby-player${p.netId === hostId ? ' host' : ''}`;
       const dot = document.createElement('i');
-      dot.style.setProperty('--c', p.color || '#fff');
+      const color = typeof p.color === 'string' && /^#[0-9a-f]{3,8}$/i.test(p.color) ? p.color : '#8a8498';
+      dot.style.setProperty('--c', color);
       const b = document.createElement('b'); b.textContent = p.name || '术师';
       const tag = document.createElement('span'); tag.className = 'tag'; tag.textContent = p.netId === hostId ? 'HOST' : 'P2P';
       const char = document.createElement('span'); char.className = 'char'; char.textContent = CHARACTER_MAP[p.charId]?.name || '';

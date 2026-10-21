@@ -536,33 +536,46 @@ export class Fighter {
 
   /* ---------------------------------------------------------- network */
   applyNetSnapshot(s) {
-    if (!s) return;
-    this.netTarget = {
-      x: s.p[0], y: s.p[1], z: s.p[2], yaw: s.yaw, hp: s.hp,
+    if (!s || typeof s !== 'object') return;
+    const p = Array.isArray(s.p) ? s.p : null;
+    if (!p || p.length < 3 || !p.slice(0, 3).every((v) => Number.isFinite(Number(v)))) return;
+    const num = (value, min, max, fallback = 0) => {
+      const n = Number(value);
+      return Number.isFinite(n) ? clamp(n, min, max) : fallback;
     };
-    this.hp = s.hp;
-    this.lives = s.lives ?? this.lives;
-    this.kills = s.kills ?? this.kills;
-    this.score = s.score ?? this.score;
+    const hp = num(s.hp, 0, this.maxHp, this.hp);
+    const yaw = num(s.yaw, -10000, 10000, this.yaw);
+    this.netTarget = {
+      x: clamp(Number(p[0]), -500, 500),
+      y: clamp(Number(p[1]), -100, 200),
+      z: clamp(Number(p[2]), -500, 500),
+      yaw, hp,
+    };
+    this.hp = hp;
+    this.lives = num(s.lives, 0, 999, this.lives);
+    this.kills = num(s.kills, 0, 99999, this.kills);
+    this.score = num(s.score, 0, 9999999, this.score);
+    this.damageDealt = num(s.damageDealt, 0, 9999999, this.damageDealt);
+    this.destruction = num(s.destruction, 0, 9999, this.destruction);
     this.dead = !!s.dead;
     this.eliminated = !!s.elim;
-    this.attackTimer = s.at || 0;
-    this.castTimer = s.ct || 0;
-    this.stunTimer = s.stun || 0;
-    this.barrierTimer = s.barrier || 0;
+    this.netAttackPose = num(s.at, 0, 1);
+    this.netCastPose = num(s.ct, 0, 1);
+    this.stunTimer = num(s.stun, 0, 30);
+    this.barrierTimer = num(s.barrier, 0, 30);
     this.fateLinked = !!s.fate;
-    this.quantumMarks = s.marks || 0;
-    this.cds = s.cds ? { q: s.cds[0], e: s.cds[1], r: s.cds[2] } : this.cds;
-    this.charges = s.ch ? { q: s.ch[0], e: s.ch[1], r: s.ch[2] } : this.charges;
-    this.shards = s.shards ?? this.shards;
-    this.aimYaw = s.yaw;
-    if (!this.netPos) this.netPos = new THREE.Vector3(s.p[0], s.p[1], s.p[2]);
-    this.netPos.set(s.p[0], s.p[1], s.p[2]);
-    if (this.dead) {
-      this.visual.group.visible = false;
-    } else {
-      this.visual.group.visible = true;
+    this.quantumMarks = num(s.marks, 0, 3);
+    if (Array.isArray(s.cds)) {
+      this.cds = { q: num(s.cds[0], 0, 999), e: num(s.cds[1], 0, 999), r: num(s.cds[2], 0, 999) };
     }
+    if (Array.isArray(s.ch)) {
+      this.charges = { q: num(s.ch[0], 0, 3), e: num(s.ch[1], 0, 3), r: 0 };
+    }
+    this.shards = num(s.shards, 0, 3, this.shards);
+    this.aimYaw = yaw;
+    if (!this.netPos) this.netPos = new THREE.Vector3(this.netTarget.x, this.netTarget.y, this.netTarget.z);
+    this.netPos.set(this.netTarget.x, this.netTarget.y, this.netTarget.z);
+    this.visual.group.visible = !this.dead;
   }
 
   updateNetVisual(dt) {
@@ -576,13 +589,14 @@ export class Fighter {
     }
     this.visual.group.position.copy(this.pos);
     if (!this.dead) this.visual.group.rotation.y = this.yaw;
-    const attackPose = this.attackTimer > 0 ? 1 - clamp(this.attackTimer / Math.max(0.001, this.attackDuration), 0, 1) : 0;
-    const castPose = this.castTimer > 0 ? 1 - clamp(this.castTimer / Math.max(0.001, this.castDuration), 0, 1) : 0;
+    const attackPose = this.netAttackPose || 0;
+    const castPose = this.netCastPose || 0;
     this.visual.update(dt, {
       speed: 0, grounded: true, attackPose, castPose, hurt: this.hitFlash > 0,
-      dead: this.dead, frozen: false, firstPerson: false,
+      dead: this.dead, frozen: false, firstPerson: this.isLocal && this.game.cameraRig?.firstPerson,
     });
-    this.nameplate.visible = false;
+    this._updateNameplate();
+    this.nameplate.visible = this.nameplate.visible && !this.isLocal && !this.dead;
   }
 
   /* ---------------------------------------------------------- simulation */
@@ -903,7 +917,10 @@ export class Fighter {
       hp: Math.max(0, Math.round(this.hp)),
       lives: this.lives,
       kills: this.kills,
+      deaths: this.deaths,
       score: Math.round(this.score),
+      damageDealt: Math.round(this.damageDealt),
+      destruction: this.destruction,
       dead: this.dead,
       elim: this.eliminated,
       at: this.getSnapshotState().at,

@@ -419,12 +419,18 @@ export class Effects {
   }
 
   dashTrail(character, color, duration = 0.4) {
-    for (let i = 0; i < 3; i++) {
-      setTimeout(() => {
-        if (!character?.group) return;
-        this.afterimage(character, color, { duration: duration * (1 - i * 0.16) });
-      }, i * 50);
-    }
+    // 使用 Effects 生命周期中的计时器，避免 setTimeout 在比赛清理后继续克隆已销毁模型
+    const timer = new THREE.Group();
+    const times = [0, 0.05, 0.1];
+    let elapsed = 0;
+    let spawned = 0;
+    this.addItem(timer, duration + 0.2, (item, dt) => {
+      elapsed += dt;
+      while (spawned < times.length && elapsed >= times[spawned]) {
+        if (character?.group) this.afterimage(character, color, { duration: duration * (1 - spawned * 0.16) });
+        spawned++;
+      }
+    }, { keepParent: true });
   }
 
   teleportBurst(position, color = 0x5af2ff) {

@@ -38,6 +38,7 @@
       </div>
       <div class="menu-top-actions">
         <span class="online-dot"><i></i> WEBGL2</span>
+        <button class="icon-btn" id="btn-fullscreen-top" title="全屏 / 退出全屏 (F)" aria-label="切换全屏">⛶</button>
         <button class="icon-btn" id="btn-help-top" title="操作说明">?</button>
         <button class="icon-btn" id="btn-settings-top" title="设置">⚙</button>
       </div>
@@ -131,7 +132,7 @@
     <footer class="menu-footer">
       <span>© 2026 SHIBUYA ANOMALY · FAN-MADE WEB EXPERIMENT</span>
       <span>THREE.JS / RAPIER / PEERJS</span>
-      <span class="build-tag">BUILD 1.0.0 / CEL-SHADED</span>
+      <span class="build-tag">BUILD 1.1.0 / CEL-SHADED</span>
     </footer>
   </div>
 
@@ -148,6 +149,7 @@
       </div>
       <div class="alive-pill"><span id="hud-alive">4</span> 名术师存活</div>
       <button class="hud-icon-btn" id="btn-pause" aria-label="暂停">Ⅱ</button>
+      <button class="hud-icon-btn" id="btn-fullscreen-hud" aria-label="切换全屏" title="全屏 / 退出全屏 (F)">⛶</button>
     </div>
 
     <div class="player-panel" id="player-panel">
@@ -261,7 +263,9 @@
           <div class="keyrow"><kbd>SHIFT</kbd><span>闪避（短暂无敌）</span></div>
           <div class="keyrow"><kbd>V</kbd><span>切换第一 / 第三人称</span></div>
           <div class="keyrow"><kbd>TAB</kbd><span>积分榜</span></div>
-          <div class="keyrow"><kbd>ESC</kbd><span>暂停</span></div>
+          <div class="keyrow"><kbd>F</kbd><span>全屏 / 退出全屏</span></div>
+          <div class="keyrow"><kbd>右键拖动</kbd><span>鼠标锁定失败时的备用视角</span></div>
+          <div class="keyrow"><kbd>ESC / P</kbd><span>暂停（P 在鼠标锁定时也可用）</span></div>
         </div>
         <div class="help-col">
           <h3>战斗要诀</h3>
@@ -292,6 +296,15 @@
           <button class="btn btn-ghost" id="btn-join"><span>加入房间</span><b>JOIN</b></button>
         </div>
       </div>
+      <details class="net-advanced">
+        <summary>高级网络 · 可选 TURN 中继</summary>
+        <p>大多数家庭/移动网络可直接 P2P。若双方处于严格 NAT、公司或校园网络，可填入免费 TURN 服务的地址与账号（仅保存在本机浏览器）。</p>
+        <div class="net-advanced-grid">
+          <label>TURN / TURNS 地址<input id="net-turn-url" placeholder="turn:host:3478" autocomplete="off" /></label>
+          <label>用户名<input id="net-turn-user" placeholder="username" autocomplete="off" /></label>
+          <label>密码 / Credential<input id="net-turn-pass" type="password" placeholder="credential" autocomplete="off" /></label>
+        </div>
+      </details>
       <div class="net-status" id="net-status">房主为权威主机，最多 4 名术师。使用免服务器的 PeerJS 直连。</div>
       <div class="lobby hidden" id="net-lobby">
         <div class="lobby-head"><span>房间码</span><b id="lobby-code">—</b><button id="btn-copy-code">复制邀请</button></div>
@@ -342,10 +355,11 @@
   <!-- MISC -->
   <div id="toast" class="toast"></div>
   <div id="rotate-hint"><span>↻</span> 建议横屏游玩</div>
-  <div id="pointer-hint" class="hidden"><span>点击画面锁定鼠标</span><small>ESC 释放</small></div>
+  <button type="button" id="pointer-hint" class="hidden" title="锁定鼠标以使用第一人称/越肩视角">
+    <span id="pointer-hint-title">点击锁定鼠标视角</span>
+    <small id="pointer-hint-sub">也可按住右键拖动 · P 暂停</small>
+  </button>
 
   <script type="module" src="/src/main.js"></script>
 </body>
 </html>
-
-
