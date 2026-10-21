@@ -5,6 +5,16 @@
 
 > 所有角色、城市、特效、音效均由代码程序化生成，项目不依赖任何商业素材或付费云服务。
 
+## 🌐 在线游玩（已上线）
+
+**游戏地址：<https://zt3339763847-maker.github.io/shibuya-anomaly/>**
+
+- 打开即可游玩，无需安装。
+- 联机：点击「联机房间」→ 创建房间 → 把房间码或「复制邀请」得到的链接发给队友。
+- 好友打开邀请链接会自动填写房间码并打开联机面板。
+- GitHub 仓库：<https://github.com/zt3339763847-maker/shibuya-anomaly>
+- 部署由 GitHub Actions → GitHub Pages 自动完成，免费、无需后端。
+
 ![menu](docs/screenshot-menu.png)
 
 ![gameplay](docs/screenshot-game.jpg)
@@ -35,10 +45,13 @@ npm run preview
 
 ### GitHub Pages
 
-1. 推送到 GitHub 仓库。
-2. 本地执行 `npm run build`。
-3. 将 `dist/` 目录发布到 `gh-pages` 分支（或使用 GitHub Actions）。
-   项目已将 `vite.config.js` 的 `base` 设为 `'./'`，放在仓库子路径也能正常加载。
+当前仓库已经配置 `main` 分支自动部署，线上地址：
+
+<https://zt3339763847-maker.github.io/shibuya-anomaly/>
+
+每次 push 到 `main`，GitHub Actions 会自动 `npm ci`、构建并发布 `dist/`。工作流见 `.github/workflows/pages.yml`。
+
+项目已将 `vite.config.js` 的 `base` 设为 `'./'`，放在仓库子路径也能正常加载。
 
 ### Vercel / Netlify / Cloudflare Pages
 
@@ -149,3 +162,4 @@ src/
 - 游戏名、角色名与技能文本均为原创演绎，与任何商业作品无关联。
 - 物理与技能数值都在 `src/data/characters.js` 和 `src/game/abilities.js` 中，可直接调整。
 - 若需要将 PeerJS 换成完全自托管信令，只需替换 `src/net/p2p.js` 中 `new Peer(...)` 的 `host` / `path` 配置。
+
