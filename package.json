@@ -1,0 +1,20 @@
+{
+  "name": "shibuya-anomaly",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "description": "咒域·涩谷 — 纯前端 3D 异能乱斗",
+  "scripts": {
+    "dev": "vite --host 0.0.0.0",
+    "build": "vite build",
+    "preview": "vite preview --host 0.0.0.0"
+  },
+  "dependencies": {
+    "@dimforge/rapier3d-compat": "^0.21.0",
+    "peerjs": "^1.5.5",
+    "three": "^0.186.1"
+  },
+  "devDependencies": {
+    "vite": "^8.3.4"
+  }
+}

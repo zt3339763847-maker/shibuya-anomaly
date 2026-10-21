@@ -1,0 +1,7 @@
+node_modules/
+dist/
+.vite/
+*.local
+test-*.png
+test*.mjs
+.DS_Store
